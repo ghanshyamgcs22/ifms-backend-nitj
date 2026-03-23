@@ -1,4 +1,7 @@
 <?php
+// api/create-budget-requests.php — FIXED
+// ✅ Now saves quotation base64 to MongoDB so it can be retrieved later
+
 header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: POST, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type, Authorization');
@@ -20,6 +23,7 @@ if (!$input) {
 // ── Required fields ───────────────────────────────────────────────────────────
 $projectId    = $input['projectId']    ?? '';
 $gpNumber     = $input['gpNumber']     ?? '';
+$fileNumber   = $input['fileNumber']   ?? '';
 $projectTitle = $input['projectTitle'] ?? '';
 $projectType  = $input['projectType']  ?? '';
 $piName       = $input['piName']       ?? '';
@@ -31,7 +35,14 @@ $headType     = $input['headType']     ?? '';
 $amount       = floatval($input['amount'] ?? 0);
 $purpose      = trim($input['purpose']      ?? '');
 $description  = trim($input['description']  ?? '');
+$material     = trim($input['material']     ?? '');
+$expenditure  = trim($input['expenditure']  ?? '');
+$mode         = trim($input['mode']         ?? '');
 $invoiceNumber= trim($input['invoiceNumber']?? '');
+
+// ✅ Quotation file (base64 data URL sent from frontend)
+$quotation     = $input['quotation']     ?? '';  // "data:application/pdf;base64,..."
+$quotationName = $input['quotationName'] ?? '';  // optional original filename
 
 // ── Validation ────────────────────────────────────────────────────────────────
 if (!$projectId || !$gpNumber || !$piEmail || !$headId || $amount <= 0 || !$purpose || !$invoiceNumber) {
@@ -52,7 +63,6 @@ try {
     $booked   = floatval($project['amountBookedByPI']    ?? 0);
     $actual   = floatval($project['actualExpenditure']   ?? 0);
 
-    // Available balance formula: Released - Booked + (Booked - Actual)
     $unusedBooking    = max(0, $booked - $actual);
     $availableBalance = max(0, $released - $booked + $unusedBooking);
 
@@ -64,11 +74,10 @@ try {
         ]); exit();
     }
 
-    // ── 2. Also validate head-level available balance ─────────────────────────
+    // ── 2. Validate head-level available balance ──────────────────────────────
     $allocDoc = $db->fund_allocations->findOne(['projectId' => $projectId]);
     if ($allocDoc && isset($allocDoc['allocations'])) {
         foreach ($allocDoc['allocations'] as $alloc) {
-            // Match by headId OR by the allocation's own _id/id
             $allocHeadId = $alloc['headId'] ?? '';
             $allocId     = (string)($alloc['_id'] ?? $alloc['id'] ?? '');
             if ($allocHeadId !== $headId && $allocId !== $headId) continue;
@@ -94,39 +103,57 @@ try {
     $count = $db->budget_requests->countDocuments([]);
     $requestNumber = 'BR/' . date('Y') . '/' . str_pad($count + 1, 4, '0', STR_PAD_LEFT);
 
-    // ── 4. Insert budget_request ──────────────────────────────────────────────
+    // ── 4. Build filename for quotation ──────────────────────────────────────
+    $safeGp   = preg_replace('/[^a-zA-Z0-9_-]/', '_', $gpNumber);
+    $safeFn   = $fileNumber ? preg_replace('/[^a-zA-Z0-9_-]/', '_', $fileNumber) : '';
+    $safeInv  = preg_replace('/[^a-zA-Z0-9_-]/', '_', $invoiceNumber);
+    $quotationFileName = "Quotation_{$safeGp}";
+    if ($safeFn)  $quotationFileName .= "_{$safeFn}";
+    if ($safeInv) $quotationFileName .= "_{$safeInv}";
+    $quotationFileName .= ".pdf";
+
+    // ── 5. Insert budget_request ──────────────────────────────────────────────
     $requestDoc = [
-        'requestNumber'  => $requestNumber,
-        'projectId'      => $projectId,
-        'gpNumber'       => $gpNumber,
-        'projectTitle'   => htmlspecialchars(strip_tags($projectTitle)),
-        'projectType'    => htmlspecialchars(strip_tags($projectType)),
-        'piName'         => htmlspecialchars(strip_tags($piName)),
-        'piEmail'        => htmlspecialchars(strip_tags($piEmail)),
-        'department'     => htmlspecialchars(strip_tags($department)),
-        'headId'         => $headId,
-        'headName'       => htmlspecialchars(strip_tags($headName)),
-        'headType'       => htmlspecialchars(strip_tags($headType)),
-        'requestedAmount'=> $amount,
-        'purpose'        => htmlspecialchars(strip_tags($purpose)),
-        'description'    => htmlspecialchars(strip_tags($description)),
-        'invoiceNumber'  => htmlspecialchars(strip_tags($invoiceNumber)),
-        'status'         => 'pending',
-        'currentStage'   => 'da',
-        'daRemarks'      => '',
-        'arRemarks'      => '',
-        'drRemarks'      => '',
-        'approvalHistory'=> [],
+        'requestNumber'     => $requestNumber,
+        'projectId'         => $projectId,
+        'gpNumber'          => $gpNumber,
+        'fileNumber'        => $fileNumber,
+        'projectTitle'      => htmlspecialchars(strip_tags($projectTitle)),
+        'projectType'       => htmlspecialchars(strip_tags($projectType)),
+        'piName'            => htmlspecialchars(strip_tags($piName)),
+        'piEmail'           => htmlspecialchars(strip_tags($piEmail)),
+        'department'        => htmlspecialchars(strip_tags($department)),
+        'headId'            => $headId,
+        'headName'          => htmlspecialchars(strip_tags($headName)),
+        'headType'          => htmlspecialchars(strip_tags($headType)),
+        'requestedAmount'   => $amount,
+        'purpose'           => htmlspecialchars(strip_tags($purpose)),
+        'description'       => htmlspecialchars(strip_tags($description)),
+        'material'          => htmlspecialchars(strip_tags($material)),
+        'expenditure'       => htmlspecialchars(strip_tags($expenditure)),
+        'mode'              => htmlspecialchars(strip_tags($mode)),
+        'invoiceNumber'     => htmlspecialchars(strip_tags($invoiceNumber)),
+
+        // ✅ Store quotation file as base64 in MongoDB
+        'quotation'         => $quotation,           // full data URL
+        'quotationFileName' => $quotationName ?: $quotationFileName,
+
+        'status'            => 'pending',
+        'currentStage'      => 'da',
+        'daRemarks'         => '',
+        'arRemarks'         => '',
+        'drRemarks'         => '',
+        'approvalHistory'   => [],
         'actualExpenditure' => 0,
-        'createdAt'      => $now,
-        'updatedAt'      => $now,
+        'hasOpenQuery'      => false,
+        'createdAt'         => $now,
+        'updatedAt'         => $now,
     ];
 
-    $result    = $db->budget_requests->insertOne($requestDoc);
+    $result     = $db->budget_requests->insertOne($requestDoc);
     $insertedId = (string) $result->getInsertedId();
 
-    // ── 5. Increment amountBookedByPI on the project ──────────────────────────
-    // This reduces the PI's available balance immediately after booking.
+    // ── 6. Increment amountBookedByPI on project ──────────────────────────────
     $db->projects->updateOne(
         ['_id' => new MongoDB\BSON\ObjectId($projectId)],
         [
@@ -135,7 +162,7 @@ try {
         ]
     );
 
-    // ── 6. Increment bookedAmount on the specific head in fund_allocations ────
+    // ── 7. Increment bookedAmount on head in fund_allocations ─────────────────
     if ($allocDoc) {
         $allocations = isset($allocDoc['allocations']) ? iterator_to_array($allocDoc['allocations']) : [];
         $updated = false;
@@ -154,10 +181,7 @@ try {
         if ($updated) {
             $db->fund_allocations->updateOne(
                 ['projectId' => $projectId],
-                ['$set' => [
-                    'allocations' => $allocations,
-                    'updatedAt'   => $now,
-                ]]
+                ['$set' => ['allocations' => $allocations, 'updatedAt' => $now]]
             );
         }
     }

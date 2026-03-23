@@ -1,7 +1,5 @@
 <?php
-error_reporting(E_ALL);
-ini_set('display_errors', 0);
-ini_set('log_errors', 1);
+// api/get-pi-budget-requests.php — WITH QUERY + REJECTION + FILE FIELDS
 
 header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: GET, OPTIONS');
@@ -14,62 +12,174 @@ ob_start();
 
 try {
     require_once __DIR__ . '/../config/database.php';
-
     $db = getMongoDBConnection();
-
     if (!$db) throw new Exception('Failed to connect to MongoDB');
-    if ($_SERVER['REQUEST_METHOD'] !== 'GET') throw new Exception('Only GET method is allowed');
+    if ($_SERVER['REQUEST_METHOD'] !== 'GET') throw new Exception('Only GET method allowed');
 
-    $piEmail = $_GET['piEmail'] ?? '';
+    $piEmail  = $_GET['piEmail']   ?? '';
+    $withFile = ($_GET['withFile'] ?? '1') !== '0';
     if (empty($piEmail)) throw new Exception('PI email is required');
 
-    $requestsCursor = $db->budget_requests->find(
+    $cursor = $db->budget_requests->find(
         ['piEmail' => $piEmail],
         ['sort' => ['createdAt' => -1]]
     );
 
-    $requests = [];
-    foreach ($requestsCursor as $request) {
-        // ── requestedAmount is the canonical field written by create-budget-requests.php
-        // Expose it as BOTH 'amount' (what frontend reads) and 'requestedAmount' for clarity.
-        $amount = floatval($request['requestedAmount'] ?? $request['amount'] ?? 0);
+    $stageLabels = [
+        'da' => 'Dealing Assistant', 'ar' => 'Accounts Representative',
+        'dr' => 'Deputy Registrar', 'drc_office' => 'DRC Office',
+        'drc_rc' => 'DRC (R&C)', 'drc' => 'DRC', 'director' => 'Director',
+    ];
 
-        // ── actualExpenditure is filled per-request by the DA after full approval.
-        // It starts as 0 and gets set by update-actual-expenditure.php.
-        $actualExpenditure = floatval($request['actualExpenditure'] ?? 0);
+    $rejectionRemarksFieldMap = [
+        'da' => 'daRemarks', 'ar' => 'arRemarks', 'dr' => 'drRemarks',
+        'drc_office' => 'drcOfficeRemarks', 'drc_rc' => 'drcRcRemarks',
+        'drc' => 'drcRemarks', 'director' => 'directorRemarks',
+    ];
+
+    $requests = [];
+    foreach ($cursor as $req) {
+        $amount            = floatval($req['requestedAmount'] ?? $req['amount'] ?? 0);
+        $actualExpenditure = floatval($req['actualExpenditure'] ?? 0);
+
+        // latestQuery
+        $latestQuery = null;
+        if (!empty($req['latestQuery'])) {
+            $lq = is_array($req['latestQuery']) ? $req['latestQuery'] : (array)$req['latestQuery'];
+            $latestQuery = [
+                'query'         => (string)($lq['query']          ?? ''),
+                'raisedBy'      => (string)($lq['raisedBy']       ?? ''),
+                'raisedByLabel' => (string)($lq['raisedByLabel']  ?? ''),
+                'raisedAt'      => (string)($lq['raisedAt']       ?? ''),
+                'raisedStage'   => (string)($lq['raisedStage']    ?? ''),
+                'resolved'      => (bool)($lq['resolved']         ?? false),
+                'resolvedAt'    => (string)($lq['resolvedAt']     ?? ''),
+                'piResponse'    => (string)($lq['piResponse']     ?? ''),
+            ];
+        }
+
+        // queries[]
+        $queries = [];
+        if (!empty($req['queries'])) {
+            foreach ($req['queries'] as $q) {
+                $q = is_array($q) ? $q : (array)$q;
+                $queries[] = [
+                    'by'         => (string)($q['by']         ?? ''),
+                    'byLabel'    => (string)($q['byLabel']    ?? ''),
+                    'to'         => (string)($q['to']         ?? ''),
+                    'query'      => (string)($q['query']      ?? ''),
+                    'stage'      => (string)($q['stage']      ?? ''),
+                    'timestamp'  => (string)($q['timestamp']  ?? ''),
+                    'resolved'   => (bool)($q['resolved']     ?? false),
+                    'piResponse' => (string)($q['piResponse'] ?? ''),
+                ];
+            }
+        }
+
+        // approvalHistory
+        $history = [];
+        if (!empty($req['approvalHistory'])) {
+            foreach ($req['approvalHistory'] as $h) {
+                $h = is_array($h) ? $h : (array)$h;
+                $history[] = [
+                    'stage'     => (string)($h['stage']     ?? ''),
+                    'action'    => (string)($h['action']    ?? ''),
+                    'by'        => (string)($h['by']        ?? ''),
+                    'timestamp' => (string)($h['timestamp'] ?? ''),
+                    'remarks'   => (string)($h['remarks']   ?? ''),
+                ];
+            }
+        }
+
+        // hasOpenQuery
+        $hasOpenQuery = (bool)($req['hasOpenQuery'] ?? false)
+                        || (string)($req['status'] ?? '') === 'query_raised';
+
+        // Rejection details
+        $rejectedAtStage      = (string)($req['rejectedAtStage'] ?? '');
+        $rejectedBy           = (string)($req['rejectedBy']      ?? '');
+        $rejectionRemarks     = '';
+        $rejectedAtStageLabel = '';
+        if (!empty($rejectedAtStage)) {
+            $rejectedAtStageLabel = $stageLabels[$rejectedAtStage] ?? strtoupper($rejectedAtStage);
+            if (isset($rejectionRemarksFieldMap[$rejectedAtStage])) {
+                $field = $rejectionRemarksFieldMap[$rejectedAtStage];
+                $rejectionRemarks = (string)($req[$field] ?? '');
+            }
+        }
+
+        // Quotation file
+        $quotationFile     = '';
+        $quotationFileName = (string)($req['quotationFileName'] ?? '');
+        if ($withFile && !empty($req['quotation'])) {
+            $quotationFile = (string)$req['quotation'];
+        }
+        if (empty($quotationFileName) && !empty($req['invoiceNumber'])) {
+            $quotationFileName = 'Quotation_' . preg_replace('/[^a-zA-Z0-9_-]/', '_', (string)$req['invoiceNumber']) . '.pdf';
+        } elseif (empty($quotationFileName)) {
+            $quotationFileName = 'Quotation.pdf';
+        }
 
         $requests[] = [
-            'id'               => (string)$request['_id'],
-            'requestNumber'    => $request['requestNumber']    ?? '',
-            'projectId'        => $request['projectId']        ?? '',
-            'gpNumber'         => $request['gpNumber']         ?? '',
-            'projectTitle'     => $request['projectTitle']     ?? '',
-            'projectType'      => $request['projectType']      ?? '',
-            'piName'           => $request['piName']           ?? '',
-            'piEmail'          => $request['piEmail']          ?? '',
-            'headId'           => $request['headId']           ?? '',
-            'headName'         => $request['headName']         ?? '',
-            'headType'         => $request['headType']         ?? '',
-            // ── The booked amount for this specific request ──
-            'amount'           => $amount,           // what frontend reads
-            'requestedAmount'  => $amount,           // alias
-            // ── Actual expenditure for THIS request (filled by DA per request) ──
-            'actualExpenditure'=> $actualExpenditure,
-            'purpose'          => $request['purpose']          ?? '',
-            'description'      => $request['description']      ?? '',
-            'invoiceNumber'    => $request['invoiceNumber']    ?? '',
-            'status'           => $request['status']           ?? 'pending',
-            'currentStage'     => $request['currentStage']     ?? 'da',
-            'daRemarks'        => $request['daRemarks']        ?? '',
-            'arRemarks'        => $request['arRemarks']        ?? '',
-            'drRemarks'        => $request['drRemarks']        ?? '',
-            'approvalHistory'  => isset($request['approvalHistory'])
-                ? array_values(iterator_to_array($request['approvalHistory']))
-                : [],
-            'createdAt'        => isset($request['createdAt'])
-                ? $request['createdAt']->toDateTime()->format('Y-m-d H:i:s') : null,
-            'updatedAt'        => isset($request['updatedAt'])
-                ? $request['updatedAt']->toDateTime()->format('Y-m-d H:i:s') : null,
+            'id'                   => (string)$req['_id'],
+            'requestNumber'        => (string)($req['requestNumber']    ?? ''),
+            'projectId'            => (string)($req['projectId']        ?? ''),
+            'gpNumber'             => (string)($req['gpNumber']         ?? ''),
+
+            // ✅ File number
+            'fileNumber'           => (string)($req['fileNumber']       ?? ''),
+
+            'projectTitle'         => (string)($req['projectTitle']     ?? ''),
+            'projectType'          => (string)($req['projectType']      ?? ''),
+            'piName'               => (string)($req['piName']           ?? ''),
+            'piEmail'              => (string)($req['piEmail']          ?? ''),
+            'department'           => (string)($req['department']       ?? ''),
+            'headId'               => (string)($req['headId']           ?? ''),
+            'headName'             => (string)($req['headName']         ?? ''),
+            'headType'             => (string)($req['headType']         ?? ''),
+            'amount'               => $amount,
+            'requestedAmount'      => $amount,
+            'actualExpenditure'    => $actualExpenditure,
+            'purpose'              => (string)($req['purpose']          ?? ''),
+            'description'          => (string)($req['description']      ?? ''),
+            'material'             => (string)($req['material']         ?? ''),
+            'expenditure'          => (string)($req['expenditure']      ?? ''),
+            'mode'                 => (string)($req['mode']             ?? ''),
+            'invoiceNumber'        => (string)($req['invoiceNumber']    ?? ''),
+            'status'               => (string)($req['status']           ?? 'pending'),
+            'previousStatus'       => (string)($req['previousStatus']   ?? ''),
+            'currentStage'         => (string)($req['currentStage']     ?? 'da'),
+            'daRemarks'            => (string)($req['daRemarks']        ?? ''),
+            'arRemarks'            => (string)($req['arRemarks']        ?? ''),
+            'drRemarks'            => (string)($req['drRemarks']        ?? ''),
+            'drcOfficeRemarks'     => (string)($req['drcOfficeRemarks'] ?? ''),
+            'drcRcRemarks'         => (string)($req['drcRcRemarks']     ?? ''),
+            'drcRemarks'           => (string)($req['drcRemarks']       ?? ''),
+            'directorRemarks'      => (string)($req['directorRemarks']  ?? ''),
+
+            // ✅ Query fields
+            'hasOpenQuery'         => $hasOpenQuery,
+            'latestQuery'          => $latestQuery,
+            'queries'              => $queries,
+            'piResponse'           => (string)($req['piResponse']       ?? ''),
+
+            // ✅ Rejection fields
+            'rejectedBy'           => $rejectedBy,
+            'rejectedAtStage'      => $rejectedAtStage,
+            'rejectedAtStageLabel' => $rejectedAtStageLabel,
+            'rejectionRemarks'     => $rejectionRemarks,
+            'rejectedAt'           => isset($req['rejectedAt'])
+                ? $req['rejectedAt']->toDateTime()->format('Y-m-d H:i:s') : null,
+
+            // Quotation file
+            'quotationFile'        => $quotationFile,
+            'quotationFileName'    => $quotationFileName,
+
+            'approvalHistory'      => $history,
+            'createdAt'            => isset($req['createdAt'])
+                ? $req['createdAt']->toDateTime()->format('Y-m-d H:i:s') : null,
+            'updatedAt'            => isset($req['updatedAt'])
+                ? $req['updatedAt']->toDateTime()->format('Y-m-d H:i:s') : null,
         ];
     }
 
