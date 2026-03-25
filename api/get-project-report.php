@@ -142,7 +142,10 @@ try {
     $brDocs = iterator_to_array(
         $db->budget_requests->find(
             ['projectId' => $projectId],
-            ['sort' => ['createdAt' => 1]]
+            [
+                'sort'       => ['createdAt' => 1],
+                'projection' => ['quotation' => 0]
+            ]
         )
     );
     if (empty($brDocs)) {
@@ -150,7 +153,10 @@ try {
             $brDocs = iterator_to_array(
                 $db->budget_requests->find(
                     ['projectId' => new MongoDB\BSON\ObjectId($projectId)],
-                    ['sort' => ['createdAt' => 1]]
+                    [
+                        'sort'       => ['createdAt' => 1],
+                        'projection' => ['quotation' => 0]
+                    ]
                 )
             );
         } catch (Exception $e) {}

@@ -52,7 +52,10 @@ try {
     $requestsCursor = $db->budget_requests->find([
         'projectId' => $projectId,
         'status'    => 'approved',
-    ], ['sort' => ['createdAt' => 1]]);
+    ], [
+        'sort'       => ['createdAt' => 1],
+        'projection' => ['quotation' => 0] // CRITICAL: Exclude large binary data from listing
+    ]);
     $allRequests = iterator_to_array($requestsCursor);
 
     // ── Build release timeline ─────────────────────────────────────────────────

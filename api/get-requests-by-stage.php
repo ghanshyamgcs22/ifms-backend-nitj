@@ -1,259 +1,270 @@
 <?php
-// api/get-requests-by-stage.php — WITH REJECTION + FILE NUMBER FIELDS
-// Returns rejectedAtStage, rejectedBy, rejectedAt, fileNumber for all requests
+// api/get-requests-by-stage.php
+// Returns ALL fields including material (pt7), expenditure (pt7), mode (pt8),
+// quotationFile base64, fileNumber, all stage remarks, latestQuery, approvalHistory.
+//
+// Sendback statuses per stage (what each stage sees as "sent back to me"):
+//   da         ← sent_back_to_da         (from AR)
+//   ar         ← sent_back_to_ar         (from DR)
+//   dr         ← sent_back_to_dr         (from DRC Office)
+//   drc_office ← sent_back_to_drc_office (from DR (R&C))
+//   drc_rc     ← sent_back_to_drc_rc     (from DRC)
+//   drc        ← sent_back_to_drc        (from Director)
 
+header('Content-Type: application/json');
 header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: GET, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type, Authorization');
-header('Content-Type: application/json');
 
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') { http_response_code(200); exit(); }
-
 require_once __DIR__ . '/../config/database.php';
 
-$stage = trim($_GET['stage'] ?? '');
-$type  = trim($_GET['type']  ?? 'pending');
+$stage    = $_GET['stage']    ?? '';
+$type     = $_GET['type']     ?? 'pending';
+$withFile = ($_GET['withFile'] ?? '1') !== '0';
 
-if (!$stage) {
-    echo json_encode(['success' => false, 'message' => 'stage parameter required']);
-    exit();
-}
-
-// ── Pending filters — includes query_raised ───────────────────────────────────
-$pendingFilters = [
-    'da'         => ['currentStage' => 'da',         'status' => ['$in' => ['pending',             'query_raised']]],
-    'ar'         => ['currentStage' => 'ar',         'status' => ['$in' => ['da_approved',          'query_raised']]],
-    'dr'         => ['currentStage' => 'dr',         'status' => ['$in' => ['ar_approved',          'query_raised']]],
-    'drc_office' => ['currentStage' => 'drc_office', 'status' => ['$in' => ['dr_approved',          'query_raised']]],
-    'drc_rc'     => ['currentStage' => 'drc_rc',     'status' => ['$in' => ['drc_office_forwarded', 'sent_back_to_drc_rc', 'query_raised']]],
-    'drc'        => ['currentStage' => 'drc',        'status' => ['$in' => ['drc_rc_forwarded',     'sent_back_to_drc',    'query_raised']]],
-    'director'   => ['currentStage' => 'director',   'status' => ['$in' => ['drc_forwarded',        'query_raised']]],
+// ── What status does each stage receive when sent back TO it ──────────────────
+$sentBackToMe = [
+    'da'         => 'sent_back_to_da',
+    'ar'         => 'sent_back_to_ar',
+    'dr'         => 'sent_back_to_dr',
+    'drc_office' => 'sent_back_to_drc_office',
+    'drc_rc'     => 'sent_back_to_drc_rc',
+    'drc'        => 'sent_back_to_drc',
+    // director never receives a sendback
 ];
 
-// ── Completed filters ─────────────────────────────────────────────────────────
-// Each stage's completed tab shows:
-//   - Requests that moved past this stage (approved/forwarded further)
-//   - Requests that were REJECTED at this specific stage
-$completedFilters = [
-    'da' => ['$or' => [
-        ['status' => ['$in' => ['da_approved','ar_approved','dr_approved','approved',
-                                'drc_office_forwarded','drc_rc_forwarded','drc_forwarded',
-                                'sent_back_to_drc_rc','sent_back_to_drc']]],
-        ['status' => 'rejected', 'rejectedAtStage' => 'da'],
-    ]],
-    'ar' => ['$or' => [
-        ['status' => ['$in' => ['ar_approved','dr_approved','approved',
-                                'drc_office_forwarded','drc_rc_forwarded','drc_forwarded',
-                                'sent_back_to_drc_rc','sent_back_to_drc']]],
-        ['status' => 'rejected', 'rejectedAtStage' => 'ar'],
-    ]],
-    'dr' => ['$or' => [
-        ['status' => ['$in' => ['approved','dr_approved','drc_office_forwarded',
-                                'drc_rc_forwarded','drc_forwarded',
-                                'sent_back_to_drc_rc','sent_back_to_drc']]],
-        ['status' => 'rejected', 'rejectedAtStage' => 'dr'],
-    ]],
-    'drc_office' => ['$or' => [
-        ['status' => ['$in' => ['drc_office_forwarded','drc_rc_forwarded','drc_forwarded',
-                                'approved','sent_back_to_drc_rc','sent_back_to_drc']]],
-        ['status' => 'rejected', 'rejectedAtStage' => 'drc_office'],
-    ]],
-    'drc_rc' => ['$or' => [
-        ['status' => ['$in' => ['drc_rc_forwarded','drc_forwarded','approved','sent_back_to_drc_rc']]],
-        ['status' => 'rejected', 'rejectedAtStage' => 'drc_rc'],
-    ]],
-    'drc' => ['$or' => [
-        ['status' => ['$in' => ['drc_forwarded','approved','sent_back_to_drc_rc','sent_back_to_drc']]],
-        ['status' => 'rejected', 'rejectedAtStage' => 'drc'],
-    ]],
-    'director' => ['$or' => [
-        ['status' => ['$in' => ['approved','sent_back_to_drc']]],
-        ['status' => 'rejected', 'rejectedAtStage' => 'director'],
-    ]],
-    'all' => ['status' => ['$in' => ['approved','rejected']]],
-];
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-function safeStr($val): string {
-    if ($val === null) return '';
-    if ($val instanceof MongoDB\BSON\UTCDateTime) return $val->toDateTime()->format('c');
-    if ($val instanceof MongoDB\BSON\ObjectId) return (string)$val;
-    if (is_array($val) || $val instanceof MongoDB\Model\BSONDocument || $val instanceof MongoDB\Model\BSONArray) return '';
-    return (string)$val;
-}
-function safeFloat($val): float {
-    if ($val === null) return 0.0;
-    if (is_array($val) || is_object($val)) return 0.0;
-    return (float)(string)$val;
-}
-function safeBool($val): bool { return (bool)$val; }
-function safeId($val): string {
-    if ($val instanceof MongoDB\BSON\ObjectId) return (string)$val;
-    if (is_array($val) && isset($val['$oid'])) return (string)$val['$oid'];
-    return (string)$val;
-}
-function safeDate($val): string {
-    if ($val === null) return '';
-    if ($val instanceof MongoDB\BSON\UTCDateTime) return $val->toDateTime()->format('c');
-    if (is_array($val)) return '';
-    return (string)$val;
-}
-function safeQuery($val): array {
-    if (empty($val)) return [];
-    $arr = is_array($val) ? $val : (array)$val;
-    return [
-        'query'         => (string)($arr['query']          ?? ''),
-        'raisedBy'      => (string)($arr['raisedBy']       ?? ''),
-        'raisedByLabel' => (string)($arr['raisedByLabel']  ?? ''),
-        'raisedAt'      => (string)($arr['raisedAt']       ?? ''),
-        'raisedStage'   => (string)($arr['raisedStage']    ?? ''),
-        'resolved'      => (bool)($arr['resolved']         ?? false),
-        'resolvedAt'    => (string)($arr['resolvedAt']     ?? ''),
-        'piResponse'    => (string)($arr['piResponse']     ?? ''),
-    ];
-}
-function safeQueriesArr($val): array {
-    if (empty($val)) return [];
-    $out = [];
-    foreach ($val as $q) {
-        $q = is_array($q) ? $q : (array)$q;
-        $out[] = [
-            'by'         => (string)($q['by']         ?? ''),
-            'byLabel'    => (string)($q['byLabel']    ?? ''),
-            'to'         => (string)($q['to']         ?? ''),
-            'query'      => (string)($q['query']      ?? ''),
-            'stage'      => (string)($q['stage']      ?? ''),
-            'timestamp'  => (string)($q['timestamp']  ?? ''),
-            'resolved'   => (bool)($q['resolved']     ?? false),
-            'piResponse' => (string)($q['piResponse'] ?? ''),
-        ];
-    }
-    return $out;
-}
-
-$stageLabels = [
-    'da' => 'Dealing Assistant', 'ar' => 'Accounts Representative',
-    'dr' => 'Deputy Registrar', 'drc_office' => 'DRC Office',
-    'drc_rc' => 'DRC (R&C)', 'drc' => 'DRC', 'director' => 'Director',
+// ── What status means "I (this stage) sent it back to the previous stage" ─────
+$sentBackByMe = [
+    'ar'         => 'sent_back_to_da',
+    'dr'         => 'sent_back_to_ar',
+    'drc_office' => 'sent_back_to_dr',
+    'drc_rc'     => 'sent_back_to_drc_office',
+    'drc'        => 'sent_back_to_drc_rc',
+    'director'   => 'sent_back_to_drc',
 ];
 
 try {
-    $db = getMongoDBConnection();
+    $db         = getMongoDBConnection();
+    $collection = $db->budget_requests;
 
-    if ($type === 'pending') {
-        if (!isset($pendingFilters[$stage])) {
-            echo json_encode(['success' => false, 'message' => "No pending filter for stage: $stage"]);
-            exit();
+    if ($type === 'completed') {
+        // Globally approved or rejected
+        $filter = ['status' => ['$in' => ['approved', 'rejected']]];
+
+    } elseif ($stage === 'all' || $type === 'all') {
+        $filter = [];
+
+    } elseif ($type === 'sentback') {
+        // "sentback" type = requests THIS stage sent back to the previous stage
+        // e.g. DR dashboard sentback tab = requests DR sent back to AR
+        if (isset($sentBackByMe[$stage])) {
+            $filter = [
+                'status'    => $sentBackByMe[$stage],
+                // The request is now sitting at the previous stage, NOT at $stage
+                // We don't filter by currentStage here because it has already moved back
+            ];
+        } else {
+            // DA has no sentback-by-me; director's sentback = sent_back_to_drc
+            $filter = ['status' => ['$regex' => '^sent_back_to_']];
         }
-        $filter = $pendingFilters[$stage];
+
+    } elseif ($type === 'pending') {
+        // "pending" = requests currently at THIS stage waiting for action
+        // Includes: normal incoming status AND sent-back-to-this-stage (returned to me)
+        $stageFilters = [
+            'da' => ['$or' => [
+                ['currentStage' => 'da', 'status' => 'pending'],
+                ['currentStage' => 'da', 'status' => 'sent_back_to_da'],   // returned from AR
+            ]],
+            'ar' => ['$or' => [
+                ['currentStage' => 'ar', 'status' => 'da_approved'],
+                ['currentStage' => 'ar', 'status' => 'sent_back_to_ar'],   // returned from DR
+            ]],
+            'dr' => ['$or' => [
+                ['currentStage' => 'dr', 'status' => 'ar_approved'],
+                ['currentStage' => 'dr', 'status' => 'sent_back_to_dr'],   // returned from DRC Office
+            ]],
+            'drc_office' => ['$or' => [
+                ['currentStage' => 'drc_office', 'status' => 'dr_approved'],
+                ['currentStage' => 'drc_office', 'status' => 'sent_back_to_drc_office'], // returned from DRC R&C
+            ]],
+            'drc_rc' => ['$or' => [
+                ['currentStage' => 'drc_rc', 'status' => 'drc_office_forwarded'],
+                ['currentStage' => 'drc_rc', 'status' => 'sent_back_to_drc_rc'],  // returned from DRC
+            ]],
+            'drc' => ['$or' => [
+                ['currentStage' => 'drc', 'status' => 'drc_rc_forwarded'],
+                ['currentStage' => 'drc', 'status' => 'sent_back_to_drc'],  // returned from Director
+            ]],
+            'director' => ['$or' => [
+                ['currentStage' => 'director', 'status' => 'drc_forwarded'],
+                // Director never receives a sendback
+            ]],
+        ];
+        $filter = $stageFilters[$stage] ?? [];
+
     } else {
-        $filterKey = array_key_exists($stage, $completedFilters) ? $stage : 'all';
-        $filter    = $completedFilters[$filterKey];
+        $filter = [];
     }
 
-    $cursor  = $db->budget_requests->find($filter, ['sort' => ['createdAt' => -1]]);
-    $results = [];
+    $cursor = $collection->find($filter, [
+        'sort'       => ['createdAt' => -1],
+        'projection' => ['quotation' => 0], // Exclude large binary from listing
+    ]);
+    $rawResults = iterator_to_array($cursor);
 
-    foreach ($cursor as $doc) {
-        // Amount extraction
-        $amount = 0.0;
-        foreach (['requestedAmount', 'amount', 'bookedAmount'] as $f) {
-            if (isset($doc[$f])) {
-                $v = safeFloat($doc[$f]);
-                if ($v > 0) { $amount = $v; break; }
+    // ── Batch Fetch Project End Dates ──────────────────
+    $pIds = array_unique(array_filter(array_map(fn($r) => $r['projectId'] ?? null, $rawResults)));
+    $pMap = [];
+    if (!empty($pIds)) {
+        $objIds = [];
+        foreach ($pIds as $id) { try { $objIds[] = new \MongoDB\BSON\ObjectId($id); } catch(Exception $e){} }
+        if (!empty($objIds)) {
+        $projs = $db->projects->find(['_id' => ['$in' => $objIds]], ['projection' => ['projectEndDate' => 1, 'totalSanctionedAmount' => 1]]);
+            foreach ($projs as $p) {
+                $pid = (string)$p['_id'];
+                $ed  = $p['projectEndDate'] ?? '';
+                $sanctioned = floatval($p['totalSanctionedAmount'] ?? 0);
+                $pMap[$pid] = [
+                    'endDate' => ($ed instanceof \MongoDB\BSON\UTCDateTime) ? $ed->toDateTime()->format('Y-m-d') : $ed,
+                    'sanctionedAmount' => $sanctioned,
+                    'heads' => []
+                ];
+            }
+
+            // Fetch head allocations for these projects
+            $headAllocs = $db->head_allocations->find(['projectId' => ['$in' => $objIds]]);
+            foreach ($headAllocs as $ha) {
+                $pIdStr = (string)$ha['projectId'];
+                $hId    = (string)($ha['headId'] ?? '');
+                $hName  = (string)($ha['headName'] ?? '');
+                if (isset($pMap[$pIdStr])) {
+                    $key = $hId ?: $hName;
+                    $pMap[$pIdStr]['heads'][$key] = [
+                        'sanctioned' => floatval($ha['sanctionedAmount'] ?? 0),
+                        'booked'     => floatval($ha['bookedAmount'] ?? 0),
+                        'type'       => $ha['headType'] ?? ''
+                    ];
+                }
             }
         }
+    }
 
-        // History
+    $result = [];
+    foreach ($rawResults as $r) {
+        $pid    = (string)($r['projectId'] ?? '');
+        $amount = floatval($r['requestedAmount'] ?? $r['amount'] ?? 0);
+
         $history = [];
-        if (!empty($doc['approvalHistory'])) {
-            foreach ($doc['approvalHistory'] as $h) {
+        if (!empty($r['approvalHistory'])) {
+            foreach ($r['approvalHistory'] as $h) {
+                $h = is_array($h) ? $h : (array)$h;
                 $history[] = [
-                    'stage'     => safeStr($h['stage']     ?? null),
-                    'action'    => safeStr($h['action']    ?? null),
-                    'by'        => safeStr($h['by']        ?? null),
-                    'timestamp' => safeStr($h['timestamp'] ?? null),
-                    'remarks'   => safeStr($h['remarks']   ?? null),
+                    'stage'     => (string)($h['stage']     ?? ''),
+                    'action'    => (string)($h['action']    ?? ''),
+                    'by'        => (string)($h['by']        ?? ''),
+                    'timestamp' => (string)($h['timestamp'] ?? ''),
+                    'remarks'   => (string)($h['remarks']   ?? ''),
                 ];
             }
         }
 
-        // Rejection details
-        $rejectedAtStage     = safeStr($doc['rejectedAtStage'] ?? null);
-        $rejectedBy          = safeStr($doc['rejectedBy']      ?? null);
-        $rejectedAt          = safeDate($doc['rejectedAt']     ?? null);
-        $rejectedAtStageLabel = !empty($rejectedAtStage) ? ($stageLabels[$rejectedAtStage] ?? strtoupper($rejectedAtStage)) : '';
-
-        // Rejection remarks — pull from the stage-specific remarks field
-        $rejectionRemarksFieldMap = [
-            'da' => 'daRemarks', 'ar' => 'arRemarks', 'dr' => 'drRemarks',
-            'drc_office' => 'drcOfficeRemarks', 'drc_rc' => 'drcRcRemarks',
-            'drc' => 'drcRemarks', 'director' => 'directorRemarks',
-        ];
-        $rejectionRemarks = '';
-        if (!empty($rejectedAtStage) && isset($rejectionRemarksFieldMap[$rejectedAtStage])) {
-            $field = $rejectionRemarksFieldMap[$rejectedAtStage];
-            $rejectionRemarks = safeStr($doc[$field] ?? null);
+        $latestQuery = null;
+        if (!empty($r['latestQuery'])) {
+            $lq = is_array($r['latestQuery']) ? $r['latestQuery'] : (array)$r['latestQuery'];
+            $latestQuery = [
+                'query'         => (string)($lq['query']         ?? ''),
+                'raisedBy'      => (string)($lq['raisedBy']      ?? ''),
+                'raisedByLabel' => (string)($lq['raisedByLabel'] ?? ''),
+                'raisedAt'      => (string)($lq['raisedAt']      ?? ''),
+                'raisedStage'   => (string)($lq['raisedStage']   ?? ''),
+                'resolved'      => (bool)($lq['resolved']        ?? false),
+                'piResponse'    => (string)($lq['piResponse']    ?? ''),
+            ];
         }
 
-        $results[] = [
-            'id'               => safeId($doc['_id']),
-            'requestNumber'    => safeStr($doc['requestNumber']    ?? null),
-            'gpNumber'         => safeStr($doc['gpNumber']         ?? null),
+        $quotationFile     = '';
+        $quotationFileName = (string)($r['quotationFileName'] ?? '');
+        if ($withFile && !empty($r['quotation'])) {
+            $quotationFile = (string)$r['quotation'];
+        }
+        if (empty($quotationFileName)) {
+            $gp = preg_replace('/[^a-zA-Z0-9_-]/', '_', (string)($r['gpNumber'] ?? ''));
+            $quotationFileName = "Quotation_{$gp}.pdf";
+        }
 
-            // ✅ File number — key field for rejection display
-            'fileNumber'       => safeStr($doc['fileNumber']       ?? null),
-            'quotationFileName'=> safeStr($doc['quotationFileName'] ?? null),
+        $currentStatus = (string)($r['status'] ?? 'pending');
 
-            'projectId'        => safeStr($doc['projectId']        ?? null),
-            'projectTitle'     => safeStr($doc['projectTitle']     ?? null),
-            'piName'           => safeStr($doc['piName']           ?? null),
-            'piEmail'          => safeStr($doc['piEmail']          ?? null),
-            'department'       => safeStr($doc['department']       ?? null),
-            'purpose'          => safeStr($doc['purpose']          ?? null),
-            'description'      => safeStr($doc['description']      ?? null),
-            'material'         => safeStr($doc['material']         ?? null),
-            'expenditure'      => safeStr($doc['expenditure']      ?? null),
-            'mode'             => safeStr($doc['mode']             ?? null),
-            'projectType'      => safeStr($doc['projectType']      ?? null),
-            'invoiceNumber'    => safeStr($doc['invoiceNumber']    ?? null),
-            'headId'           => safeStr($doc['headId']           ?? null),
-            'headName'         => safeStr($doc['headName']         ?? null),
-            'headType'         => safeStr($doc['headType']         ?? null),
+        $reqHeadId   = (string)($r['headId'] ?? '');
+        $reqHeadName = (string)($r['headName'] ?? '');
+        $hKey        = $reqHeadId ?: $reqHeadName;
+        $headSanctioned = $pMap[$pid]['heads'][$hKey]['sanctioned'] ?? 0;
+        $headBooked     = $pMap[$pid]['heads'][$hKey]['booked'] ?? 0;
+
+        $result[] = [
+            'id'               => (string)($r['_id']),
+            'requestNumber'    => (string)($r['requestNumber']    ?? ''),
+            'projectId'        => (string)($r['projectId']        ?? ''),
+            'gpNumber'         => (string)($r['gpNumber']         ?? ''),
+            'fileNumber'       => (string)($r['fileNumber']       ?? ''),
+            'projectTitle'     => (string)($r['projectTitle']     ?? ''),
+            'piName'           => (string)($r['piName']           ?? ''),
+            'piEmail'          => (string)($r['piEmail']          ?? ''),
+            'department'       => (string)($r['department']       ?? ''),
+            'headId'           => (string)($r['headId']           ?? ''),
+            'headName'         => (string)($r['headName']         ?? ''),
+            'headType'         => (string)($r['headType']         ?? ''),
+            'projectType'      => (string)($r['projectType']      ?? ''),
             'amount'           => $amount,
-            'actualExpenditure'=> safeFloat($doc['actualExpenditure'] ?? null),
-            'status'           => safeStr($doc['status']           ?? null),
-            'previousStatus'   => safeStr($doc['previousStatus']   ?? null),
-            'currentStage'     => safeStr($doc['currentStage']     ?? null),
-            'chainType'        => safeStr($doc['chainType']        ?? null),
-            'createdAt'        => safeDate($doc['createdAt']       ?? null),
-            'updatedAt'        => safeDate($doc['updatedAt']       ?? null),
-            'daRemarks'        => safeStr($doc['daRemarks']        ?? null),
-            'arRemarks'        => safeStr($doc['arRemarks']        ?? null),
-            'drRemarks'        => safeStr($doc['drRemarks']        ?? null),
-            'drcOfficeRemarks' => safeStr($doc['drcOfficeRemarks'] ?? null),
-            'drcRcRemarks'     => safeStr($doc['drcRcRemarks']     ?? null),
-            'drcRemarks'       => safeStr($doc['drcRemarks']       ?? null),
-            'directorRemarks'  => safeStr($doc['directorRemarks']  ?? null),
+            'requestedAmount'  => $amount,
+            'projectEndDate'   => $pMap[$pid]['endDate'] ?? '',
+            'totalSanctionedAmount' => $pMap[$pid]['sanctionedAmount'] ?? 0,
+            'headSanctionedAmount' => $headSanctioned,
+            'headBookedAmount'     => $headBooked,
+            'actualExpenditure'=> floatval($r['actualExpenditure'] ?? 0),
+            'invoiceNumber'    => (string)($r['invoiceNumber']    ?? ''),
+            'purpose'          => (string)($r['purpose']          ?? ''),
+            'description'      => (string)($r['description']      ?? ''),
+            'material'         => (string)($r['material']         ?? ''),
+            'expenditure'      => (string)($r['expenditure']      ?? ''),
+            'mode'             => (string)($r['mode']             ?? ''),
+            'quotationFile'    => $quotationFile,
+            'quotationFileName'=> $quotationFileName,
+            'status'           => $currentStatus,
+            'previousStatus'   => (string)($r['previousStatus']   ?? ''),
+            'currentStage'     => (string)($r['currentStage']     ?? 'da'),
+            'hasOpenQuery'     => (bool)($r['hasOpenQuery']        ?? false),
+            // isSentBack = this request was sent back TO me (returned for re-work)
+            'isSentBack'       => str_starts_with($currentStatus, 'sent_back_to_'),
+            // All stage remarks
+            'daRemarks'        => (string)($r['daRemarks']        ?? ''),
+            'arRemarks'        => (string)($r['arRemarks']        ?? ''),
+            'drRemarks'        => (string)($r['drRemarks']        ?? ''),
+            'drcOfficeRemarks' => (string)($r['drcOfficeRemarks'] ?? ''),
+            'drcRcRemarks'     => (string)($r['drcRcRemarks']     ?? ''),
+            'drcRemarks'       => (string)($r['drcRemarks']       ?? ''),
+            'directorRemarks'  => (string)($r['directorRemarks']  ?? ''),
+            'latestQuery'      => $latestQuery,
             'approvalHistory'  => $history,
-
-            // ✅ REJECTION FIELDS
-            'rejectedBy'           => $rejectedBy,
-            'rejectedAt'           => $rejectedAt,
-            'rejectedAtStage'      => $rejectedAtStage,
-            'rejectedAtStageLabel' => $rejectedAtStageLabel,
-            'rejectionRemarks'     => $rejectionRemarks,
-
-            // Query fields
-            'hasOpenQuery'     => safeBool($doc['hasOpenQuery']    ?? false),
-            'latestQuery'      => safeQuery($doc['latestQuery']    ?? null),
-            'queries'          => safeQueriesArr($doc['queries']   ?? null),
-            'piResponse'       => safeStr($doc['piResponse']       ?? null),
+            'latestRemark'     => (function($hist) {
+                if (empty($hist)) return '';
+                for ($i = count($hist) - 1; $i >= 0; $i--) {
+                    if (!empty($hist[$i]['remarks'])) return $hist[$i]['remarks'];
+                }
+                return '';
+            })($history),
+            'approvalType'     => (string)($r['approvalType']     ?? ''),
+            'rejectedBy'           => (string)($r['rejectedBy']           ?? ''),
+            'rejectedAtStage'      => (string)($r['rejectedAtStage']      ?? ''),
+            'rejectedAtStageLabel' => (string)($r['rejectedAtStageLabel'] ?? ''),
+            'rejectionRemarks'     => (string)($r['rejectionRemarks']     ?? ''),
+            'createdAt' => isset($r['createdAt']) ? $r['createdAt']->toDateTime()->format('Y-m-d H:i:s') : '',
+            'updatedAt' => isset($r['updatedAt']) ? $r['updatedAt']->toDateTime()->format('Y-m-d H:i:s') : '',
         ];
     }
 
-    echo json_encode(['success' => true, 'data' => $results, 'count' => count($results)]);
-
+    echo json_encode(['success' => true, 'data' => $result, 'count' => count($result)]);
 } catch (Exception $e) {
     http_response_code(500);
     echo json_encode(['success' => false, 'message' => $e->getMessage()]);

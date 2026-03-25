@@ -108,7 +108,10 @@ try {
     /* ── PATH A: per-request update (DA dashboard) ──────────────────────── */
     if ($requestId !== '') {
 
-        $br = $db->budget_requests->findOne(['_id' => new MongoDB\BSON\ObjectId($requestId)]);
+        $br = $db->budget_requests->findOne(
+            ['_id' => new MongoDB\BSON\ObjectId($requestId)],
+            ['projection' => ['quotation' => 0]]
+        );
         if (!$br) {
             http_response_code(404);
             echo json_encode(['success' => false, 'message' => 'Budget request not found']);

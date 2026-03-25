@@ -1,11 +1,10 @@
 <?php
 // api/resolve-query.php
-// Resolves an open query raised by a reviewer.
-// ✅ If PI uploads a new quotation:
-//    - Saves new quotation base64 to the request
-//    - quotationFileName updated to new filename
-//    - fileNumber is ALWAYS kept as the EXISTING one — never changed
-// ✅ Restores previousStatus so the request goes back to the correct reviewer stage.
+// ✅ PI can now update ALL purchase fields:
+//    purpose, description, invoiceNumber, material, mode, piResponse
+// ✅ expenditure is NOT updated by PI — it stays as set by AR/DR
+// ✅ fileNumber is ALWAYS kept as the EXISTING one — never changed
+// ✅ Restores previousStatus so request goes back to the correct reviewer stage
 
 header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: POST, OPTIONS');
@@ -13,6 +12,9 @@ header('Access-Control-Allow-Headers: Content-Type, Authorization');
 header('Content-Type: application/json');
 
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') { http_response_code(200); exit(); }
+
+use MongoDB\BSON\ObjectId;
+use MongoDB\BSON\UTCDateTime;
 
 require_once __DIR__ . '/../config/database.php';
 
@@ -25,27 +27,32 @@ if (!$input) {
     echo json_encode(['success' => false, 'message' => 'Invalid JSON']); exit();
 }
 
-$requestId        = trim($input['requestId']        ?? '');
-$piEmail          = trim($input['piEmail']          ?? '');
-$piResponse       = trim($input['piResponse']       ?? '');
-$purpose          = trim($input['purpose']          ?? '');
-$description      = trim($input['description']      ?? '');
-$material         = trim($input['material']         ?? '');
-$expenditure      = trim($input['expenditure']      ?? '');
-$mode             = trim($input['mode']             ?? '');
-$invoiceNumber    = trim($input['invoiceNumber']    ?? '');
+$requestId     = trim($input['requestId']     ?? '');
+$piEmail       = trim($input['piEmail']       ?? '');
+$piResponse    = trim($input['piResponse']    ?? '');
 
-// New quotation file (optional — file number is NEVER updated from here)
-$newQuotation     = $input['newQuotation']     ?? '';   // base64 data URL
-$newQuotationName = trim($input['newQuotationName'] ?? ''); // original filename
-// $newFileNumber from frontend is intentionally IGNORED — we always keep the DB value
+// ✅ All PI-editable purchase fields
+$purpose       = trim($input['purpose']       ?? '');
+$description   = trim($input['description']   ?? '');
+$invoiceNumber = trim($input['invoiceNumber'] ?? '');
+$material      = trim($input['material']      ?? ''); // ✅ PI can correct material/qty
+$mode          = trim($input['mode']          ?? ''); // ✅ PI can correct mode of procurement
+
+// ✅ expenditure is intentionally NOT accepted from PI — owned by AR/DR
+
+// New quotation file (optional)
+$newQuotation     = $input['newQuotation']     ?? '';
+$newQuotationName = trim($input['newQuotationName'] ?? '');
 
 if (!$requestId)  { echo json_encode(['success' => false, 'message' => 'requestId required']);  exit(); }
 if (!$piResponse) { echo json_encode(['success' => false, 'message' => 'piResponse required']); exit(); }
 
 try {
     $db  = getMongoDBConnection();
-    $req = $db->budget_requests->findOne(['_id' => new MongoDB\BSON\ObjectId($requestId)]);
+    $req = $db->budget_requests->findOne(
+        ['_id' => new ObjectId($requestId)],
+        ['projection' => ['quotation' => 0]]
+    );
 
     if (!$req) {
         echo json_encode(['success' => false, 'message' => 'Request not found']); exit();
@@ -57,15 +64,15 @@ try {
         echo json_encode(['success' => false, 'message' => 'Unauthorized']); exit();
     }
 
-    // ── Always use the EXISTING file number from DB ───────────────────────────
+    // ── Always use the EXISTING file number from DB — never change it ─────
     $existingFileNumber = (string)($req['fileNumber'] ?? '');
 
-    $now = new MongoDB\BSON\UTCDateTime();
+    $now = new UTCDateTime();
 
-    // ── Restore status ────────────────────────────────────────────────────────
+    // ── Restore status ────────────────────────────────────────────────────
     $restoredStatus = !empty($req['previousStatus']) ? (string)$req['previousStatus'] : 'pending';
 
-    // ── Build approval history entry ──────────────────────────────────────────
+    // ── Build approval history entry ──────────────────────────────────────
     $history = isset($req['approvalHistory']) ? iterator_to_array($req['approvalHistory']) : [];
     $history[] = [
         'stage'     => (string)($req['currentStage'] ?? 'pi'),
@@ -75,13 +82,13 @@ try {
         'remarks'   => $piResponse,
     ];
 
-    // ── Mark latestQuery resolved ─────────────────────────────────────────────
+    // ── Mark latestQuery resolved ─────────────────────────────────────────
     $latestQuery = isset($req['latestQuery']) ? (array)$req['latestQuery'] : [];
     $latestQuery['resolved']   = true;
     $latestQuery['resolvedAt'] = date('c');
     $latestQuery['piResponse'] = $piResponse;
 
-    // ── Mark all open queries resolved ────────────────────────────────────────
+    // ── Mark all open queries resolved ────────────────────────────────────
     $queries = [];
     if (!empty($req['queries'])) {
         foreach ($req['queries'] as $q) {
@@ -95,7 +102,7 @@ try {
         }
     }
 
-    // ── Base $set fields ──────────────────────────────────────────────────────
+    // ── Base $set fields ──────────────────────────────────────────────────
     $setFields = [
         'status'          => $restoredStatus,
         'previousStatus'  => '',
@@ -104,36 +111,34 @@ try {
         'queries'         => $queries,
         'approvalHistory' => $history,
         'piResponse'      => $piResponse,
-
-        'purpose'         => htmlspecialchars(strip_tags($purpose)),
-        'description'     => htmlspecialchars(strip_tags($description)),
-        'material'        => htmlspecialchars(strip_tags($material)),
-        'expenditure'     => htmlspecialchars(strip_tags($expenditure)),
-        'mode'            => htmlspecialchars(strip_tags($mode)),
-        'invoiceNumber'   => htmlspecialchars(strip_tags($invoiceNumber)),
-
-        // ✅ fileNumber is NEVER touched — always left as the existing value
         'updatedAt'       => $now,
     ];
 
-    // ── NEW QUOTATION: update file content only, keep fileNumber unchanged ────
+    // ── Only update fields that were actually sent (non-empty) ────────────
+    if (!empty($purpose))       $setFields['purpose']       = htmlspecialchars(strip_tags($purpose));
+    if (!empty($description))   $setFields['description']   = htmlspecialchars(strip_tags($description));
+    if (!empty($invoiceNumber)) $setFields['invoiceNumber']  = htmlspecialchars(strip_tags($invoiceNumber));
+    if (!empty($material))      $setFields['material']       = htmlspecialchars(strip_tags($material));
+    if (!empty($mode))          $setFields['mode']           = htmlspecialchars(strip_tags($mode));
+
+    // ── NEW QUOTATION: update file content only, keep fileNumber unchanged ─
     if (!empty($newQuotation)) {
-        $setFields['quotation'] = $newQuotation;  // replace base64 content
+        $setFields['quotation'] = $newQuotation;
 
         // Build a descriptive filename using existing file number
         $safeGp  = preg_replace('/[^a-zA-Z0-9_\-\/]/', '_', $req['gpNumber'] ?? '');
         $safeFN  = preg_replace('/[^a-zA-Z0-9_\-\/]/', '_', $existingFileNumber);
-        $safeInv = preg_replace('/[^a-zA-Z0-9_-]/', '_', $invoiceNumber);
+        $safeInv = preg_replace('/[^a-zA-Z0-9_-]/', '_', $invoiceNumber ?: (string)($req['invoiceNumber'] ?? ''));
         $generatedName = "Quotation_{$safeGp}_{$safeFN}";
         if ($safeInv) $generatedName .= "_{$safeInv}";
         $generatedName .= ".pdf";
 
         $setFields['quotationFileName'] = $newQuotationName ?: $generatedName;
-        // ✅ No $setFields['fileNumber'] — existing DB value is preserved
+        // ✅ fileNumber is NOT in $setFields — DB value is preserved automatically
     }
 
     $db->budget_requests->updateOne(
-        ['_id' => new MongoDB\BSON\ObjectId($requestId)],
+        ['_id' => new ObjectId($requestId)],
         ['$set' => $setFields]
     );
 
