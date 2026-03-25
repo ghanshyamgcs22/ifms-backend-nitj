@@ -57,7 +57,7 @@ try {
     $rawResults = iterator_to_array($cursor);
 
     // ── 1. Batch Fetch Project End Dates ──────────────────
-    $projectIds = array_unique(array_filter(array_map(fn($r) => $r['projectId'] ?? null, $rawResults)));
+    $projectIds = array_values(array_unique(array_filter(array_map(fn($r) => $r['projectId'] ?? null, $rawResults))));
     $projectMap = [];
     if (!empty($projectIds)) {
         $objIds = [];
@@ -80,7 +80,7 @@ try {
             }
 
             // Fetch head allocations for these projects to get head-specific sanctioned amounts
-            $headAllocs = $db->head_allocations->find(['projectId' => ['$in' => $projectIds]]);
+            $headAllocs = $db->head_allocations->find(['projectId' => ['$in' => array_values($projectIds)]]);
             foreach ($headAllocs as $ha) {
                 $pid = (string)$ha['projectId'];
                 $hId = (string)($ha['headId'] ?? '');
