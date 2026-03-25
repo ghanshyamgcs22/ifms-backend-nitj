@@ -1,0 +1,18 @@
+# Environment variables — NEVER commit these
+.env
+.env.*
+*.env
+
+# Vendor dependencies (installed at build time)
+vendor/
+
+# PHP local debug files
+*.log
+debug_db.php
+debug_request.php
+test_api.php
+verify_api_fix.php
+
+# OS files
+.DS_Store
+Thumbs.db
