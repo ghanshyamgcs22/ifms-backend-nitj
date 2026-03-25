@@ -126,7 +126,7 @@ try {
     }
     
     echo "\n✅ Now run migrate-database.php to complete the setup!\n";
-    echo "URL: http://localhost:8000/api/migrate-database.php\n\n";
+    echo "URL: ${import.meta.env.VITE_API_URL}/api/migrate-database.php\n\n";
     
 } catch (Exception $e) {
     echo "\n❌ ERROR\n";

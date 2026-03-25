@@ -150,6 +150,6 @@ if (file_exists($apiPath)) {
 echo "\n=== Test Complete ===\n";
 echo "\n✨ Next Steps:\n";
 echo "1. Start backend server: php -S localhost:8000\n";
-echo "2. Test API: http://localhost:8000/api/departments.php\n";
+echo "2. Test API: ${import.meta.env.VITE_API_URL}/api/departments.php\n";
 echo "3. Start your frontend and test the form\n";
 ?>

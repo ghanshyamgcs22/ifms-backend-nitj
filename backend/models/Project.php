@@ -247,6 +247,12 @@ class Project {
     public function getAll() {
         $pipeline = [
             [
+                '$project' => [
+                    'sanctionedLetterFile' => 0,
+                    'extensionLetterFile'  => 0,
+                ]
+            ],
+            [
                 '$lookup' => [
                     'from' => 'fund_allocations',
                     'localField' => '_id',
@@ -327,6 +333,12 @@ class Project {
 
         $pipeline = [
             ['$match' => $filter],
+            [
+                '$project' => [
+                    'sanctionedLetterFile' => 0,
+                    'extensionLetterFile'  => 0,
+                ]
+            ],
             [
                 '$lookup' => [
                     'from' => 'fund_allocations',

@@ -5,7 +5,7 @@ RUN apt-get update && apt-get install -y \
     libssl-dev \
     git \
     unzip \
-    && pecl install mongodb \
+    && pecl install mongodb-1.17.0 \
     && docker-php-ext-enable mongodb
 
 # Install Composer globally
@@ -21,7 +21,7 @@ WORKDIR /var/www/html
 COPY . /var/www/html/
 
 # Install PHP dependencies
-RUN composer install --no-dev --optimize-autoloader --ignore-platform-req=ext-mongodb
+RUN composer update --no-dev --optimize-autoloader --ignore-platform-req=ext-mongodb
 
 # Tell Apache to allow .htaccess overrides in the document root
 RUN echo "<Directory /var/www/html/>\n\

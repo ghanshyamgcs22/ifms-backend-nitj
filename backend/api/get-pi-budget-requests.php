@@ -22,13 +22,34 @@ try {
 
     $cursor = $db->budget_requests->find(
         ['piEmail' => $piEmail],
-        ['sort' => ['createdAt' => -1]]
+        [
+            'sort' => ['createdAt' => -1],
+            'projection' => ['quotation' => 0] // CRITICAL: Exclude large binary data from listing
+        ]
     );
+
+    $rawResults = iterator_to_array($cursor);
+
+    // ── Batch Fetch Project End Dates ──────────────────
+    $pIds = array_unique(array_filter(array_map(fn($r) => $r['projectId'] ?? null, $rawResults)));
+    $pMap = [];
+    if (!empty($pIds)) {
+        $objIds = [];
+        foreach ($pIds as $id) { try { $objIds[] = new MongoDB\BSON\ObjectId($id); } catch(Exception $e){} }
+        if (!empty($objIds)) {
+            $projs = $db->projects->find(['_id' => ['$in' => $objIds]], ['projection' => ['projectEndDate' => 1]]);
+            foreach ($projs as $p) {
+                $pid = (string)$p['_id'];
+                $ed  = $p['projectEndDate'] ?? '';
+                $pMap[$pid] = ($ed instanceof MongoDB\BSON\UTCDateTime) ? $ed->toDateTime()->format('Y-m-d') : $ed;
+            }
+        }
+    }
 
     $stageLabels = [
         'da' => 'Dealing Assistant', 'ar' => 'Accounts Representative',
         'dr' => 'Deputy Registrar', 'drc_office' => 'DRC Office',
-        'drc_rc' => 'DRC (R&C)', 'drc' => 'DRC', 'director' => 'Director',
+        'drc_rc' => 'DR (R&C)', 'drc' => 'DRC', 'director' => 'Director',
     ];
 
     $rejectionRemarksFieldMap = [
@@ -38,9 +59,10 @@ try {
     ];
 
     $requests = [];
-    foreach ($cursor as $req) {
+    foreach ($rawResults as $req) {
         $amount            = floatval($req['requestedAmount'] ?? $req['amount'] ?? 0);
         $actualExpenditure = floatval($req['actualExpenditure'] ?? 0);
+        $pid               = (string)($req['projectId'] ?? '');
 
         // latestQuery
         $latestQuery = null;
@@ -129,6 +151,7 @@ try {
             // ✅ File number
             'fileNumber'           => (string)($req['fileNumber']       ?? ''),
 
+            'projectEndDate'       => $pMap[$pid]                       ?? '',
             'projectTitle'         => (string)($req['projectTitle']     ?? ''),
             'projectType'          => (string)($req['projectType']      ?? ''),
             'piName'               => (string)($req['piName']           ?? ''),

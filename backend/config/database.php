@@ -1,12 +1,16 @@
 <?php
-require_once __DIR__ . '/../../vendor/autoload.php';
+require_once __DIR__ . '/../vendor/autoload.php';
 
 use MongoDB\Client;
 use Dotenv\Dotenv;
 
-// Load .env from backend parent root
-$dotenv = Dotenv::createImmutable(dirname(dirname(__DIR__)));
-$dotenv->load();
+// Load .env from project root
+try {
+    $dotenv = Dotenv::createImmutable(dirname(__DIR__));
+    $dotenv->safeLoad();
+} catch (Exception $e) {
+    // Ignore dotenv exceptions in production since we use system environment variables
+}
 
 
 class Database {
@@ -31,7 +35,7 @@ class Database {
             }
 
             $this->client = new Client($this->atlas_uri);
-            // $this->client->listDatabases();
+            $this->client->listDatabases();
 
             error_log("✅ MongoDB connected successfully");
 

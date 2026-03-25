@@ -178,6 +178,7 @@ try {
             'daRemarks'      => (string)($req['daRemarks']     ?? ''),
             'arRemarks'      => (string)($req['arRemarks']     ?? ''),
             'drRemarks'      => (string)($req['drRemarks']     ?? ''),
+            'approvalType'   => (string)($req['approvalType']  ?? ''),
         ],
     ]);
 

@@ -38,7 +38,7 @@ use MongoDB\BSON\ObjectId;
 use MongoDB\BSON\UTCDateTime;
 
 try {
-    $client = new Client("mongodb+srv://vaaditahira_db_user:X9xd8FRkedqnFb0g@cluster0.kkaiv8w.mongodb.net/?appName=Cluster0");
+    $client = new Client("");
     $db = $client->research_projects;
     $releasedFundsCollection = $db->released_funds;
     $budgetRequestsCollection = $db->budget_requests;

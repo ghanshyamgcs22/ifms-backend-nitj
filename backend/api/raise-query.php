@@ -10,6 +10,9 @@ header('Content-Type: application/json');
 
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') { http_response_code(200); exit(); }
 
+use MongoDB\BSON\ObjectId;
+use MongoDB\BSON\UTCDateTime;
+
 require_once __DIR__ . '/../config/database.php';
 
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
@@ -27,7 +30,10 @@ if (empty($remarks)) { echo json_encode(['success' => false, 'message' => 'Query
 
 try {
     $db  = getMongoDBConnection();
-    $req = $db->budget_requests->findOne(['_id' => new MongoDB\BSON\ObjectId($requestId)]);
+    $req = $db->budget_requests->findOne(
+        ['_id' => new ObjectId($requestId)],
+        ['projection' => ['quotation' => 0]]
+    );
 
     if (!$req) { echo json_encode(['success' => false, 'message' => 'Request not found']); exit(); }
     if (in_array($req['status'], ['approved', 'rejected'])) {
@@ -36,12 +42,12 @@ try {
 
     $stageLabels = [
         'da' => 'DA', 'ar' => 'AR', 'dr' => 'DR',
-        'drc_office' => 'DRC Office', 'drc_rc' => 'DRC (R&C)',
+        'drc_office' => 'DRC Office', 'drc_rc' => 'DR (R&C)',
         'drc' => 'DRC', 'director' => 'Director',
     ];
     $stageLabel = $stageLabels[$req['currentStage']] ?? strtoupper($req['currentStage']);
 
-    $now     = new MongoDB\BSON\UTCDateTime();
+    $now     = new UTCDateTime();
     $history = isset($req['approvalHistory']) ? iterator_to_array($req['approvalHistory']) : [];
     $history[] = [
         'stage'     => $req['currentStage'],
@@ -53,7 +59,7 @@ try {
     ];
 
     $db->budget_requests->updateOne(
-        ['_id' => new MongoDB\BSON\ObjectId($requestId)],
+        ['_id' => new ObjectId($requestId)],
         [
             '$set' => [
                 // ✅ KEY FIX: change status so both dashboards can filter on it

@@ -11,6 +11,8 @@ header('Content-Type: application/json');
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') { http_response_code(200); exit(); }
 
 require_once __DIR__ . '/../config/database.php';
+use MongoDB\BSON\ObjectId;
+use MongoDB\BSON\UTCDateTime;
 
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     echo json_encode(['success' => false, 'message' => 'Method not allowed']); exit();
@@ -57,7 +59,10 @@ if (!array_key_exists($stage, $stageStatusMap)) {
 
 try {
     $db  = getMongoDBConnection();
-    $req = $db->budget_requests->findOne(['_id' => new MongoDB\BSON\ObjectId($requestId)]);
+    $req = $db->budget_requests->findOne(
+        ['_id' => new ObjectId($requestId)],
+        ['projection' => ['quotation' => 0]]
+    );
 
     if (!$req) {
         echo json_encode(['success' => false, 'message' => 'Request not found']); exit();
@@ -75,7 +80,7 @@ try {
         echo json_encode(['success' => false, 'message' => "Invalid status '{$req['status']}' for rejection at $stage"]); exit();
     }
 
-    $now     = new MongoDB\BSON\UTCDateTime();
+    $now     = new UTCDateTime();
     $history = isset($req['approvalHistory']) ? iterator_to_array($req['approvalHistory']) : [];
     $history[] = [
         'stage'     => $stage,
@@ -86,7 +91,7 @@ try {
     ];
 
     $db->budget_requests->updateOne(
-        ['_id' => new MongoDB\BSON\ObjectId($requestId)],
+        ['_id' => new ObjectId($requestId)],
         ['$set' => [
             'status'                  => 'rejected',
             'currentStage'            => $stage,

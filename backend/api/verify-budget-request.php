@@ -23,6 +23,9 @@ header('Access-Control-Allow-Methods: POST, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type, Authorization');
 header('Content-Type: application/json');
 
+use MongoDB\BSON\ObjectId;
+use MongoDB\BSON\UTCDateTime;
+
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     http_response_code(200);
     exit();
@@ -69,9 +72,10 @@ try {
     $adminRemarks = htmlspecialchars(strip_tags($data['adminRemarks'] ?? ''));
     
     // Get the budget request
-    $request = $db->budget_requests->findOne([
-        '_id' => new MongoDB\BSON\ObjectId($requestId)
-    ]);
+    $request = $db->budget_requests->findOne(
+        ['_id' => new ObjectId($requestId)],
+        ['projection' => ['quotation' => 0]]
+    );
     
     if (!$request) {
         throw new Exception('Budget request not found');
@@ -120,25 +124,25 @@ try {
             [
                 '$set' => [
                     'bookedAmount' => $newBookedAmount,
-                    'updatedAt' => new MongoDB\BSON\UTCDateTime()
+                    'updatedAt' => new UTCDateTime()
                 ]
             ]
         );
         
         // Update project - increase amountBookedByPI
         $project = $db->projects->findOne([
-            '_id' => new MongoDB\BSON\ObjectId($projectId)
+            '_id' => new ObjectId($projectId)
         ]);
         
         $currentProjectBooked = floatval($project['amountBookedByPI'] ?? 0);
         $newProjectBooked = $currentProjectBooked + $requestedAmount;
         
         $db->projects->updateOne(
-            ['_id' => new MongoDB\BSON\ObjectId($projectId)],
+            ['_id' => new ObjectId($projectId)],
             [
                 '$set' => [
                     'amountBookedByPI' => $newProjectBooked,
-                    'updatedAt' => new MongoDB\BSON\UTCDateTime()
+                    'updatedAt' => new UTCDateTime()
                 ]
             ]
         );
@@ -160,20 +164,20 @@ try {
     
     $statusHistory[] = [
         'status' => $newStatus,
-        'timestamp' => new MongoDB\BSON\UTCDateTime(),
+        'timestamp' => new UTCDateTime(),
         'note' => $statusNote
     ];
     
     $db->budget_requests->updateOne(
-        ['_id' => new MongoDB\BSON\ObjectId($requestId)],
+        ['_id' => new ObjectId($requestId)],
         [
             '$set' => [
                 'status' => $newStatus,
                 'adminVerifiedBy' => $adminName,
-                'adminVerifiedAt' => new MongoDB\BSON\UTCDateTime(),
+                'adminVerifiedAt' => new UTCDateTime(),
                 'adminRemarks' => $adminRemarks,
                 'statusHistory' => $statusHistory,
-                'updatedAt' => new MongoDB\BSON\UTCDateTime()
+                'updatedAt' => new UTCDateTime()
             ]
         ]
     );
