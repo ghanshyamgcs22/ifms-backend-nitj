@@ -12,6 +12,7 @@ debug_db.php
 debug_request.php
 test_api.php
 verify_api_fix.php
+phppath.txt
 
 # OS files
 .DS_Store

@@ -14,14 +14,14 @@ COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
 # Enable necessary Apache modules for routing (.htaccess) and CORS headers
 RUN a2enmod rewrite headers
 
-# Set Apache Document Root to the inner backend directory
+# Set Apache Document Root
 WORKDIR /var/www/html
 
-# Copy the inner backend directory contents to the container
-COPY backend/ /var/www/html/
+# Copy the backend files to the container (the root contains all files)
+COPY . /var/www/html/
 
 # Install PHP dependencies
-RUN composer update --no-dev --optimize-autoloader --ignore-platform-req=ext-mongodb
+RUN composer install --no-dev --optimize-autoloader --ignore-platform-req=ext-mongodb
 
 # Tell Apache to allow .htaccess overrides in the document root
 RUN echo "<Directory /var/www/html/>\n\
